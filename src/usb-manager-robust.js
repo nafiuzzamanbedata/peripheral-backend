@@ -3,6 +3,8 @@ const { exec, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const logger = require('./utils/logger');
+const { log } = require('console');
+const { usb } = require('usb');
 
 class RobustUSBManager extends EventEmitter {
   constructor() {
@@ -153,10 +155,10 @@ class RobustUSBManager extends EventEmitter {
       );
 
       // Check for new devices
-      currentDevices.forEach(device => {
+      currentDevices.forEach(async (device) => {
         const deviceId = this.generateDeviceIdFromUSB(device);
         if (!this.devices.has(deviceId)) {
-          const deviceInfo = this.enrichUSBDeviceInfo(device, 'connected');
+          const deviceInfo = await this.enrichUSBDeviceInfo(device, 'connected');
           this.handleDeviceConnect(deviceInfo);
         }
       });
@@ -371,27 +373,70 @@ class RobustUSBManager extends EventEmitter {
     return `${desc.idVendor}-${desc.idProduct}-${desc.iSerialNumber || 'no-serial'}`;
   }
 
+  // Try to get string descriptor from device
+  async getStringDescriptor(device, index) {
+    if (!index) return null;
+
+    return new Promise((resolve) => {
+      device.getStringDescriptor(index, (error, desc) => {
+        if (error || !desc) {
+          console.error(`Failed to get string descriptor ${index}:`, error);
+          resolve(null);
+        } else {
+          resolve(desc);
+        }
+      });
+    });
+  }
+
   /**
    * Enrich USB device info from usb library
    */
-  enrichUSBDeviceInfo(usbDevice, status = 'connected') {
+  async enrichUSBDeviceInfo(usbDevice, status = 'connected') {
     const desc = usbDevice.deviceDescriptor;
-    logger.info(usbDevice);
-    logger.info(desc);
     const now = new Date().toISOString();
 
-    return {
-      id: this.generateDeviceIdFromUSB(usbDevice),
-      vendorId: desc.idVendor,
-      productId: desc.idProduct,
-      serialNumber: desc.iSerialNumber || null,
-      manufacturer: 'Unknown Manufacturer',
-      productName: this.getProductName(desc.idVendor, desc.idProduct),
-      status: status,
-      connectedAt: status === 'connected' ? now : null,
-      disconnectedAt: status === 'disconnected' ? now : null,
-      lastSeen: now
-    };
+    // Open device to read string descriptors
+    try {
+      usbDevice.open();
+
+      const [manufacturer, product] = await Promise.all([
+        this.getStringDescriptor(usbDevice, desc.iManufacturer),
+        this.getStringDescriptor(usbDevice, desc.iProduct)
+      ]);
+
+      return {
+        id: this.generateDeviceIdFromUSB(usbDevice),
+        vendorId: desc.idVendor,
+        productId: desc.idProduct,
+        serialNumber: await this.getStringDescriptor(usbDevice, desc.iSerialNumber),
+        manufacturer: manufacturer || 'Unknown Manufacturer',
+        productName: product || this.getProductName(desc.idVendor, desc.idProduct),
+        status: status,
+        connectedAt: status === 'connected' ? now : null,
+        disconnectedAt: status === 'disconnected' ? now : null,
+        lastSeen: now,
+        bcdDevice: desc.bcdDevice,
+        bcdUSB: desc.bcdUSB
+      };
+    } catch (error) {
+      console.error('Error processing USB device:', error);
+      return {
+        id: this.generateDeviceIdFromUSB(usbDevice),
+        vendorId: desc.idVendor,
+        productId: desc.idProduct,
+        serialNumber: null,
+        manufacturer: 'Unknown Manufacturer',
+        productName: this.getProductName(desc.idVendor, desc.idProduct),
+        status: 'error',
+        error: error.message,
+        lastSeen: now
+      };
+    } finally {
+      if (usbDevice.interfaces) {
+        usbDevice.close();
+      }
+    }
   }
 
   /**
@@ -530,8 +575,10 @@ class RobustUSBManager extends EventEmitter {
     if (!this.usbLib) return;
 
     const usbDevices = this.usbLib.getDeviceList();
-    usbDevices.forEach(usbDevice => {
-      const deviceInfo = this.enrichUSBDeviceInfo(usbDevice, 'connected');
+    logger.info(usbDevices);
+    logger.info(`Found ${usbDevices.length} USB devices using usb library`);
+    usbDevices.forEach(async (usbDevice) => {
+      const deviceInfo = await this.enrichUSBDeviceInfo(usbDevice, 'connected');
       this.devices.set(deviceInfo.id, deviceInfo);
     });
   }
@@ -584,6 +631,7 @@ class RobustUSBManager extends EventEmitter {
       0x1234: 'Example Vendor',
       0x04d8: 'Microchip Technology Inc.',
       0x046d: 'Logitech',
+      0x09da: 'A4TECH',
       0x413c: 'Dell Computer Corp.',
       0x05ac: 'Apple Inc.',
       0x045e: 'Microsoft Corp.',
