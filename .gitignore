@@ -1,0 +1,46 @@
+# Node modules
+node_modules/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Coverage directory (e.g. for Jest)
+coverage/
+
+# Build output (if using TypeScript or bundlers)
+dist/
+build/
+
+# Debug tools
+.vscode/
+.idea/
+
+# Optional cache directories
+.cache/
+tmp/
+temp/
+
+# PM2 process manager logs
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Others
+*.tgz
+*.swp
+*.swo
+*.bak
