@@ -6,7 +6,7 @@ const logger = require('../utils/logger');
  * Initialize API routes with USB manager instance
  */
 function initializeRoutes(usbManager) {
-  
+
   // Get all connected USB devices
   router.get('/devices', (req, res) => {
     try {
@@ -31,7 +31,7 @@ function initializeRoutes(usbManager) {
   router.get('/devices/:id', (req, res) => {
     try {
       const device = usbManager.getDevice(req.params.id);
-      
+
       if (!device) {
         return res.status(404).json({
           success: false,
@@ -60,7 +60,7 @@ function initializeRoutes(usbManager) {
     try {
       const limit = parseInt(req.query.limit) || 50;
       const history = usbManager.getHistory(limit);
-      
+
       res.json({
         success: true,
         data: history,
@@ -82,7 +82,7 @@ function initializeRoutes(usbManager) {
   router.get('/status', (req, res) => {
     try {
       const status = usbManager.getStatus();
-      
+
       res.json({
         success: true,
         data: {
@@ -109,7 +109,7 @@ function initializeRoutes(usbManager) {
     try {
       await usbManager.refreshDeviceList();
       const devices = usbManager.getDevices();
-      
+
       res.json({
         success: true,
         message: 'Device list refreshed successfully',
@@ -142,14 +142,14 @@ function initializeRoutes(usbManager) {
     try {
       const devices = usbManager.getDevices();
       const history = usbManager.getHistory(1000);
-      
+
       // Calculate statistics
       const connectedCount = devices.filter(d => d.status === 'connected').length;
       const disconnectedCount = devices.filter(d => d.status === 'disconnected').length;
-      
+
       const connectEvents = history.filter(h => h.eventType === 'connect').length;
       const disconnectEvents = history.filter(h => h.eventType === 'disconnect').length;
-      
+
       // Group by manufacturer
       const manufacturerStats = devices.reduce((acc, device) => {
         const manufacturer = device.manufacturer || 'Unknown';
@@ -181,6 +181,17 @@ function initializeRoutes(usbManager) {
         error: 'Failed to retrieve statistics',
         message: error.message
       });
+    }
+  });
+
+  // In your Express/Koa/etc. routes file
+  router.post('/usb/write', async (req, res) => {
+    try {
+      const { deviceId, data } = req.body;
+      const result = await usbManager.writeToUSBDevice(deviceId, data);
+      res.json(result);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
     }
   });
 

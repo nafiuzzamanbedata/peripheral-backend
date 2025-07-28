@@ -34,7 +34,7 @@ class USBMonitorService {
   }
 
   /**
-   * Setup Express middleware
+   * Setup Express middleware to log incoming requests, handle CORS, and parse JSON bodies
    */
   setupMiddleware() {
     // Security headers

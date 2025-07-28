@@ -250,10 +250,13 @@ class RobustUSBManager extends EventEmitter {
     try {
       switch (platform) {
         case 'darwin':
+          console.log('Parsing macOS USB output');
           return this.parseMacUSBOutput(output);
         case 'linux':
+          console.log('Parsing Linux USB output');
           return this.parseLinuxUSBOutput(output);
         case 'win32':
+          console.log('Parsing Windows USB output');
           return this.parseWindowsUSBOutput(output);
         default:
           return [];
@@ -707,6 +710,71 @@ class RobustUSBManager extends EventEmitter {
     this.stopMonitoring();
     this.devices.clear();
     this.removeAllListeners();
+  }
+
+  async writeToUSBDevice(deviceId, data) {
+    let device;
+    let interfce;
+
+    try {
+      device = this.findDeviceById(deviceId);
+      if (!device) throw new Error('Device not found');
+
+      console.log('Opening device...');
+      device.open();
+
+      // Handle kernel drivers
+      device.interfaces.forEach(iface => {
+        try {
+          if (iface.isKernelDriverActive()) {
+            iface.detachKernelDriver();
+          }
+        } catch (detachError) {
+          console.warn(`Couldn't detach kernel driver for interface ${iface.id}:`, detachError);
+        }
+      });
+
+      interfce = device.interfaces[0];
+      console.log('Claiming interface...');
+      interfce.claim();
+
+      const endpoint = interfce.endpoints.find(e => e.direction === 'out') || interfce.endpoints[0];
+      if (!endpoint) throw new Error('No suitable endpoint found');
+
+      const buffer = Buffer.from(data, 'utf-8');
+      console.log(`Writing ${buffer.length} bytes...`);
+
+      return new Promise((resolve, reject) => {
+        endpoint.transfer(buffer, (error) => {
+          try {
+            interfce.release(true, (releaseError) => {
+              device.close();
+              if (error) reject(error);
+              else if (releaseError) reject(releaseError);
+              else resolve({ success: true });
+            });
+          } catch (e) {
+            device.close();
+            reject(e);
+          }
+        });
+      });
+    } catch (error) {
+      console.error('USB Write Error:', error);
+      try {
+        if (interfce) interfce.release(true);
+        if (device) device.close();
+      } catch (cleanupError) {
+        console.error('Cleanup error:', cleanupError);
+      }
+      throw error;
+    }
+  }
+
+  findDeviceById(deviceId) {
+    // get the connected devices and check if the deviceId exists
+    const devices = this.usbLib.getDeviceList();
+    return devices.find(device => this.generateDeviceIdFromUSB(device) === deviceId);
   }
 }
 
