@@ -187,8 +187,8 @@ function initializeRoutes(usbManager) {
   // In your Express/Koa/etc. routes file
   router.post('/usb/write', async (req, res) => {
     try {
-      const { deviceId, data } = req.body;
-      const result = await usbManager.writeToUSBDevice(deviceId, data);
+      const { deviceId, fileName, data } = req.body;
+      const result = await usbManager.writeFileToUSB(deviceId, fileName, data);
       res.json(result);
     } catch (error) {
       res.status(500).json({ error: error.message });

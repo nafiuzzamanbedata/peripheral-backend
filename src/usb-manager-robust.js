@@ -23,7 +23,7 @@ class RobustUSBManager extends EventEmitter {
   }
 
   /**
-   * Try to load USB libraries with fallback
+   * Try to load USB libraries with fallback (Determines monitoring method)
    */
   loadUSBLibraries() {
     try {
@@ -51,7 +51,7 @@ class RobustUSBManager extends EventEmitter {
   }
 
   /**
-   * Initialize USB monitoring
+   * Initialize USB monitoring (Called inside server initialize() method)
    */
   async initialize() {
     try {
@@ -371,9 +371,14 @@ class RobustUSBManager extends EventEmitter {
   /**
    * Generate device ID from USB library device
    */
-  generateDeviceIdFromUSB(usbDevice) {
-    const desc = usbDevice.deviceDescriptor;
-    return `${desc.idVendor}-${desc.idProduct}-${desc.iSerialNumber || 'no-serial'}`;
+  generateDeviceIdFromUSB(device) {
+    const desc = device.deviceDescriptor;
+    return [
+      desc.idVendor.toString(16).padStart(4, '0'),
+      desc.idProduct.toString(16).padStart(4, '0'),
+      device.busNumber,
+      device.deviceAddress
+    ].join('-');
   }
 
   // Try to get string descriptor from device
@@ -525,7 +530,7 @@ class RobustUSBManager extends EventEmitter {
   }
 
   /**
-   * Refresh the current device list
+   * Refresh the current device list (First Run)
    */
   async refreshDeviceList() {
     try {
@@ -551,7 +556,7 @@ class RobustUSBManager extends EventEmitter {
   }
 
   /**
-   * Refresh devices using native detection
+   * Refresh devices using native detection (First Run)
    */
   async refreshWithNativeDetection() {
     if (!this.usbDetection) return;
@@ -572,7 +577,7 @@ class RobustUSBManager extends EventEmitter {
   }
 
   /**
-   * Refresh devices using USB library
+   * Refresh devices using USB library (First Run)
    */
   async refreshWithUSBLibrary() {
     if (!this.usbLib) return;
@@ -587,7 +592,7 @@ class RobustUSBManager extends EventEmitter {
   }
 
   /**
-   * Refresh devices using system commands
+   * Refresh devices using system commands (First Run)
    */
   async refreshWithSystemCommands() {
     const systemDevices = await this.getSystemUSBDevices();
@@ -712,62 +717,211 @@ class RobustUSBManager extends EventEmitter {
     this.removeAllListeners();
   }
 
-  async writeToUSBDevice(deviceId, data) {
-    let device;
-    let interfce;
+  getMountPoints() {
+    try {
+      if (process.platform === 'darwin') { // macOS
+        const output = exec('df -h').toString();
+        return output.split('\n')
+          .filter(line => line.includes('/Volumes/'))
+          .map(line => line.split(' ').pop());
+      } else if (process.platform === 'win32') { // Windows
+        const output = exec('wmic logicaldisk get name').toString();
+        return output.split('\r\n')
+          .filter(line => /^[A-Z]:/.test(line))
+          .map(line => line.trim());
+      } else { // Linux
+        const output = exec('mount | grep /media/ || mount | grep /mnt/').toString();
+        return output.split('\n')
+          .filter(Boolean)
+          .map(line => line.split(' ')[2]);
+      }
+    } catch (error) {
+      console.error('Error detecting mounts:', error);
+      return [];
+    }
+  }
+
+  async getUSBStoragePath(deviceId) {
+    const device = this.findDeviceById(deviceId);
+    if (!device) throw new Error('Device not found');
+
+    const vendorId = device.deviceDescriptor.idVendor;
+    const productId = device.deviceDescriptor.idProduct;
 
     try {
-      device = this.findDeviceById(deviceId);
-      if (!device) throw new Error('Device not found');
+      if (process.platform === 'win32') {
+        console.log('Using Windows USB path detection');
+        return this._getWindowsUSBPath(vendorId, productId);
+      } else if (process.platform === 'darwin') {
+        console.log('Using macOS USB path detection');
+        return this._getMacUSBPath(vendorId, productId);
+      } else {
+        console.log('Using Linux USB path detection');
+        return this._getLinuxUSBPath(vendorId, productId);
+      }
+    } catch (error) {
+      throw new Error(`Could not locate USB storage: ${error.message}`);
+    }
+  }
 
-      console.log('Opening device...');
-      device.open();
+  // Windows implementation
+  _getWindowsUSBPath(vendorId, productId) {
+    const drives = exec('wmic logicaldisk where "DriveType=2" get DeviceID').toString()
+      .split('\r\n')
+      .filter(line => /^[A-Z]:/.test(line))
+      .map(line => line.trim());
 
-      // Handle kernel drivers
-      device.interfaces.forEach(iface => {
-        try {
-          if (iface.isKernelDriverActive()) {
-            iface.detachKernelDriver();
-          }
-        } catch (detachError) {
-          console.warn(`Couldn't detach kernel driver for interface ${iface.id}:`, detachError);
+    for (const drive of drives) {
+      try {
+        // Check if this is our device by querying USB info (Windows-specific)
+        const driveInfo = exec(`wmic volume where "DriveLetter='${drive}'" get DeviceID`).toString();
+        if (driveInfo.includes(`VID_${vendorId.toString(16).padStart(4, '0')}`) &&
+          driveInfo.includes(`PID_${productId.toString(16).padStart(4, '0')}`)) {
+          return drive + '\\';
         }
-      });
+      } catch (e) {
+        continue;
+      }
+    }
+    throw new Error('Matching USB storage not found');
+  }
 
-      interfce = device.interfaces[0];
-      console.log('Claiming interface...');
-      interfce.claim();
+  // macOS implementation
+  _getMacUSBPath(vendorId, productId) {
+    const volumes = exec('df -h | grep /Volumes/').toString()
+      .split('\n')
+      .filter(Boolean)
+      .map(line => line.split(' ').pop());
 
-      const endpoint = interfce.endpoints.find(e => e.direction === 'out') || interfce.endpoints[0];
-      if (!endpoint) throw new Error('No suitable endpoint found');
+    for (const volume of volumes) {
+      try {
+        // Check if this is our device by checking disk info
+        const diskInfo = exec(`diskutil info "${volume}"`).toString();
+        if (diskInfo.includes(`Vendor ID:  0x${vendorId.toString(16).padStart(4, '0')}`) &&
+          diskInfo.includes(`Product ID: 0x${productId.toString(16).padStart(4, '0')}`)) {
+          return volume + '/';
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    throw new Error('Matching USB storage not found');
+  }
 
-      const buffer = Buffer.from(data, 'utf-8');
-      console.log(`Writing ${buffer.length} bytes...`);
+  // Linux implementation
+  _getLinuxUSBPath(vendorId, productId) {
+    const mounts = exec('mount | grep /media/ || mount | grep /mnt/').toString()
+      .split('\n')
+      .filter(Boolean)
+      .map(line => line.split(' ')[2]);
 
-      return new Promise((resolve, reject) => {
-        endpoint.transfer(buffer, (error) => {
-          try {
-            interfce.release(true, (releaseError) => {
-              device.close();
-              if (error) reject(error);
-              else if (releaseError) reject(releaseError);
-              else resolve({ success: true });
-            });
-          } catch (e) {
-            device.close();
-            reject(e);
+    for (const mount of mounts) {
+      try {
+        // Check USB device info via symlinks
+        const realPath = fs.realpathSync(mount);
+        const deviceInfo = exec(`udevadm info -q property -n ${realPath}`).toString();
+        if (deviceInfo.includes(`ID_VENDOR_ID=${vendorId.toString(16)}`) &&
+          deviceInfo.includes(`ID_MODEL_ID=${productId.toString(16)}`)) {
+          return mount + '/';
+        }
+      } catch (e) {
+        continue;
+      }
+    }
+    throw new Error('Matching USB storage not found');
+  }
+
+  // Get USB device tree from system_profiler
+  async getUSBDeviceTree() {
+    try {
+      const output = await new Promise((resolve, reject) => {
+        exec('system_profiler SPUSBDataType -json', (error, stdout, stderr) => {
+          if (error) {
+            reject(error);
+          } else if (stderr) {
+            reject(new Error(stderr));
+          } else {
+            resolve(stdout);
           }
         });
       });
+
+      console.log('USB Device Tree:', output);
+      return JSON.parse(output).SPUSBDataType;
     } catch (error) {
-      console.error('USB Write Error:', error);
-      try {
-        if (interfce) interfce.release(true);
-        if (device) device.close();
-      } catch (cleanupError) {
-        console.error('Cleanup error:', cleanupError);
+      throw new Error(`Failed to get USB device tree: ${error.message}`);
+    }
+  }
+
+  // Find mount point for specific device
+  async findMountPointForDevice(deviceId) {
+    const device = this.findDeviceById(deviceId);
+    if (!device) throw new Error('Device not found');
+
+    const vendorId = device.deviceDescriptor.idVendor;
+    const productId = device.deviceDescriptor.idProduct;
+    const busNumber = device.busNumber;
+    const deviceAddress = device.deviceAddress;
+
+    const usbTree = await this.getUSBDeviceTree();
+
+    // Search through USB tree for matching device
+    for (const bus of usbTree) {
+      if (!bus._items) continue;
+
+      for (const usbDevice of bus._items) {
+        // Match by vendor/product ID or bus/device position
+        const matchesById = (
+          parseInt(usbDevice.vendor_id?.split('x')[1], 16) === vendorId &&
+          parseInt(usbDevice.product_id?.split('x')[1], 16) === productId
+        );
+
+        const matchesByLocation = (
+          usbDevice.location_id?.includes(busNumber.toString()) &&
+          usbDevice.location_id?.includes(deviceAddress.toString())
+        );
+
+        if (matchesById || matchesByLocation) {
+          // Check for media with mount points
+          if (usbDevice.Media) {
+            for (const media of usbDevice.Media) {
+              if (media.volumes) {
+                for (const volume of media.volumes) {
+                  if (volume.mount_point && volume.writable === 'yes') {
+                    return volume.mount_point;
+                  }
+                }
+              }
+            }
+          }
+        }
       }
-      throw error;
+    }
+
+    throw new Error('No writable mount point found for device');
+  }
+
+  // Main write method
+  async writeFileToUSB(deviceId, filename, content) {
+    try {
+      const mountPoint = await this.findMountPointForDevice(deviceId);
+      const filePath = path.join(mountPoint, filename);
+
+      await fs.promises.writeFile(filePath, content, 'utf-8');
+
+      return {
+        success: true,
+        path: filePath,
+        deviceId: deviceId,
+        bytesWritten: content.length
+      };
+    } catch (error) {
+      console.error('Error writing to USB:', error);
+      return {
+        success: false,
+        error: error.message,
+        deviceId: deviceId
+      };
     }
   }
 
